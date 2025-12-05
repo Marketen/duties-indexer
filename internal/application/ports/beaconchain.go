@@ -34,4 +34,7 @@ type BeaconChainAdapter interface {
 
 	// GetCommitteeSizeMap returns the size of each attestation committee for a specific slot.
 	GetCommitteeSizeMap(ctx context.Context, slot domain.Slot) (domain.CommitteeSizeMap, error)
+
+	// GetAllActiveValidatorIndices returns all active validator indices known by the beacon node.
+	GetAllActiveValidatorIndices(ctx context.Context) ([]domain.ValidatorIndex, error)
 }

@@ -2,7 +2,7 @@
 
 ## Overview
 
-`duties-indexer` is a small monitoring service that connects to an Ethereum consensus (beacon) node and checks whether a configured set of validators actually performed their **proposer** and **attester** duties once an epoch is finalized.
+`duties-indexer` is a small monitoring service that connects to an Ethereum consensus (beacon) node and checks whether a set of validators actually performed their **proposer** and **attester** duties once an epoch is finalized.
 
 For every new finalized epoch, the service:
 
@@ -42,36 +42,23 @@ This design reduces repeated beacon-node calls (one committees call per duty slo
 - Go (1.21+ recommended) if running natively, or Docker if using containers.
 - Environment/config entries for at least:
   - Beacon node URL (e.g. `http://localhost:5052`).
-  - Validator identifiers to track (indices or pubkeys, depending on your config loader).
   - Poll interval (how often to check for new finalized epochs).
+  - Optional: a comma-separated list of validator indices to track. If omitted, all **active** validators reported by the beacon node are tracked.
 
-Check `internal/config/config_loader.go` for the exact env var names.
+See `internal/config/config_loader.go` and `cmd/main.go` for details.
 
 ### Run with Docker
 
 ```bash
 # From the repo root
-# Example (adjust env vars to your setup)
+
+# Minimal example: track all active validators
 BEACON_NODE_URL=http://your-beacon-node:5052 \
-VALIDATOR_INDICES=1234,5678 \
-POLL_INTERVAL=30s \
+POLL_INTERVAL_SECONDS=60 \
 docker compose up --build
-```
 
-### Run with Go
-
-```bash
-# From the repo root
-export BEACON_NODE_URL=http://your-beacon-node:5052
-export VALIDATOR_INDICES=1234,5678
-export POLL_INTERVAL=30s
-
-go run ./cmd
-```
-
-Or build:
-
-```bash
-go build -o duties-indexer ./cmd
-./duties-indexer
-```
+# Or restrict to a specific set of validators
+BEACON_NODE_URL=http://your-beacon-node:5052 \
+POLL_INTERVAL_SECONDS=60 \
+VALIDATOR_INDICES=1234,5678,9012 \
+docker compose up --build

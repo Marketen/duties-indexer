@@ -227,3 +227,23 @@ func (b *beaconAttestantClient) DidProposeBlock(ctx context.Context, slot domain
 	}
 	return block != nil && block.Data != nil, nil
 }
+
+func (b *beaconAttestantClient) GetAllActiveValidatorIndices(ctx context.Context) ([]domain.ValidatorIndex, error) {
+	validators, err := b.client.Validators(ctx, &api.ValidatorsOpts{
+		State: "head",
+		ValidatorStates: []apiv1.ValidatorState{
+			apiv1.ValidatorStateActiveOngoing,
+			apiv1.ValidatorStateActiveExiting,
+			apiv1.ValidatorStateActiveSlashed,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var indices []domain.ValidatorIndex
+	for _, v := range validators.Data {
+		indices = append(indices, domain.ValidatorIndex(v.Index))
+	}
+	return indices, nil
+}

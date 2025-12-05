@@ -34,26 +34,24 @@ func Load() (*Config, error) {
 	}
 	pollInterval := time.Duration(sec) * time.Second
 
+	// VALIDATOR_INDICES is now optional. If empty, we leave ValidatorIndices
+	// empty and the main program will fall back to tracking all active validators.
 	valStr := strings.TrimSpace(os.Getenv("VALIDATOR_INDICES"))
-	if valStr == "" {
-		return nil, fmt.Errorf("VALIDATOR_INDICES is required (e.g. \"12,3,4,5,76,87\")")
-	}
-
-	rawParts := strings.Split(valStr, ",")
-	indices := make([]domain.ValidatorIndex, 0, len(rawParts))
-	for _, p := range rawParts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
+	indices := []domain.ValidatorIndex{}
+	if valStr != "" {
+		rawParts := strings.Split(valStr, ",")
+		indices = make([]domain.ValidatorIndex, 0, len(rawParts))
+		for _, p := range rawParts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			n, err := strconv.ParseUint(p, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid validator index %q in VALIDATOR_INDICES: %w", p, err)
+			}
+			indices = append(indices, domain.ValidatorIndex(n))
 		}
-		n, err := strconv.ParseUint(p, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid validator index %q in VALIDATOR_INDICES: %w", p, err)
-		}
-		indices = append(indices, domain.ValidatorIndex(n))
-	}
-	if len(indices) == 0 {
-		return nil, fmt.Errorf("no valid validator indices parsed from VALIDATOR_INDICES")
 	}
 
 	return &Config{

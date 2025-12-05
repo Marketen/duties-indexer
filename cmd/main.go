@@ -30,10 +30,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Decide which validator indices to track:
+	// - If VALIDATOR_INDICES is set in config, use those.
+	// - If empty, fall back to all active validators from the beacon node.
+	validatorIndices := cfg.ValidatorIndices
+	if len(validatorIndices) == 0 {
+		logger.Info("No validator indices configured; fetching all active validators from beacon node")
+		activeValidatorIndices, err := beaconAdapter.GetAllActiveValidatorIndices(context.Background())
+		if err != nil {
+			logger.Error("Failed to fetch active validator indices: %v", err)
+			os.Exit(1)
+		}
+		validatorIndices = activeValidatorIndices
+	}
+
+	logger.Info("Tracking %d validators", len(validatorIndices))
+
 	dutiesChecker := services.NewDutiesChecker(
 		beaconAdapter,
 		cfg.PollInterval,
-		cfg.ValidatorIndices,
+		validatorIndices,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
