@@ -138,6 +138,7 @@ func (a *DutiesChecker) checkAttestations(
 	}
 
 	// Build: slot -> committee-index -> size using full committee info from beacon.
+	logger.Info("Fetching all committee sizes for %d unique duty slots", len(dutySlots))
 	slotCommitteeSizes := make(map[domain.Slot]domain.CommitteeSizeMap)
 	for slot := range dutySlots {
 		m, err := a.BeaconAdapter.GetCommitteeSizeMap(ctx, slot)
@@ -145,14 +146,14 @@ func (a *DutiesChecker) checkAttestations(
 			logger.Warn("Error fetching committee sizes for slot %d: %v", slot, err)
 			continue
 		}
+		logger.Info("Slot %d commitee size gotten", slot)
 		slotCommitteeSizes[slot] = m
 	}
-
-	logger.Info("slotCommitteeSizes are %+v", slotCommitteeSizes)
 
 	minSlot, maxSlot := getSlotRangeForDuties(duties)
 	slotAttestations := preloadSlotAttestations(ctx, a.BeaconAdapter, minSlot, maxSlot)
 
+	logger.Info("Searching attestations made in the next 32 slots for %d duties", len(duties))
 	for _, duty := range duties {
 		attestationFound := a.checkDutyAttestation(ctx, duty, slotAttestations, slotCommitteeSizes)
 		if !attestationFound {
