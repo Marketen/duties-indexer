@@ -29,10 +29,9 @@ type BeaconChainAdapter interface {
 	// DidProposeBlock checks if a block was proposed at a specific slot (i.e. block exists).
 	DidProposeBlock(ctx context.Context, slot domain.Slot) (bool, error)
 
-	// GetEpochCommittees returns full committee assignments for a given epoch:
-	// data-slot → committee-index → validators in that committee.
-	GetEpochCommittees(ctx context.Context, epoch domain.Epoch) (domain.EpochCommittees, error)
-
 	// GetBlockAttestations returns all attestations included in the block at the given slot.
 	GetBlockAttestations(ctx context.Context, slot domain.Slot) ([]domain.Attestation, error)
+
+	// GetCommitteeSizeMap returns the size of each attestation committee for a specific slot.
+	GetCommitteeSizeMap(ctx context.Context, slot domain.Slot) (domain.CommitteeSizeMap, error)
 }

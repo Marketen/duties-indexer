@@ -17,7 +17,9 @@ type ValidatorDuty struct {
 	ValidatorIndex        ValidatorIndex
 	Slot                  Slot
 	CommitteeIndex        CommitteeIndex
-	ValidatorCommitteeIdx uint64 // index of validator within its committee
+	ValidatorCommitteeIdx uint64
+	CommitteeLength       uint64 // NEW electra: size of this committee
+	CommitteesAtSlot      uint64 // NEW electra: number of committees in this slot
 }
 
 // Attestation is a simplified representation of a beacon block attestation
@@ -37,3 +39,5 @@ type Attestation struct {
 //
 //	data-slot -> committee-index -> list of validator indices in that committee
 type EpochCommittees map[Slot]map[CommitteeIndex][]ValidatorIndex
+
+type CommitteeSizeMap map[CommitteeIndex]int

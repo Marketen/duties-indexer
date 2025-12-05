@@ -1,3 +1,4 @@
+// internal/adapters/beaconchain_adapter.go
 package adapters
 
 import (
@@ -10,44 +11,39 @@ import (
 
 	"github.com/Marketen/duties-indexer/internal/application/domain"
 	"github.com/Marketen/duties-indexer/internal/application/ports"
+	apiv1 "github.com/attestantio/go-eth2-client/api/v1"
+	"github.com/rs/zerolog"
 
 	"github.com/attestantio/go-eth2-client/api"
-	apiv1 "github.com/attestantio/go-eth2-client/api/v1"
-	eth2http "github.com/attestantio/go-eth2-client/http"
+	"github.com/attestantio/go-eth2-client/http"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
-	"github.com/rs/zerolog"
 )
 
-// beaconHTTPClient implements ports.BeaconChainAdapter using go-eth2-client.
-type beaconHTTPClient struct {
-	client *eth2http.Service
+type beaconAttestantClient struct {
+	client *http.Service
 }
 
-// NewBeaconHTTPAdapter is the constructor used from main.go.
-func NewBeaconHTTPAdapter(endpoint string) (ports.BeaconChainAdapter, error) {
-	// Silence go-eth2-client logs unless they are warnings+.
+func NewBeaconAttestantAdapter(endpoint string) (ports.BeaconChainAdapter, error) {
 	zerolog.SetGlobalLevel(zerolog.WarnLevel)
 
-	customHTTPClient := &nethttp.Client{
-		Timeout: 2000 * time.Second, // global upper bound; per-request timeout below
+	customHttpClient := &nethttp.Client{
+		Timeout: 2000 * time.Second,
 	}
 
-	client, err := eth2http.New(
-		context.Background(),
-		eth2http.WithAddress(endpoint),
-		eth2http.WithHTTPClient(customHTTPClient),
-		// This is the per-request timeout used by go-eth2-client.
-		eth2http.WithTimeout(20*time.Second),
+	client, err := http.New(context.Background(),
+		http.WithAddress(endpoint),
+		http.WithHTTPClient(customHttpClient),
+		http.WithTimeout(20*time.Second), // important as attestant API overrides my timeout TODO: investigate how
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return &beaconHTTPClient{client: client.(*eth2http.Service)}, nil
+	return &beaconAttestantClient{client: client.(*http.Service)}, nil
 }
 
-// GetFinalizedEpoch returns the latest finalized epoch.
-func (b *beaconHTTPClient) GetFinalizedEpoch(ctx context.Context) (domain.Epoch, error) {
+// GetFinalizedEpoch retrieves the latest finalized epoch from the beacon chain.
+func (b *beaconAttestantClient) GetFinalizedEpoch(ctx context.Context) (domain.Epoch, error) {
 	finality, err := b.client.Finality(ctx, &api.FinalityOpts{State: "head"})
 	if err != nil {
 		return 0, err
@@ -55,168 +51,108 @@ func (b *beaconHTTPClient) GetFinalizedEpoch(ctx context.Context) (domain.Epoch,
 	return domain.Epoch(finality.Data.Finalized.Epoch), nil
 }
 
-// GetValidatorDutiesBatch returns attester duties for given validators in an epoch.
-func (b *beaconHTTPClient) GetValidatorDutiesBatch(
-	ctx context.Context,
-	epoch domain.Epoch,
-	indices []domain.ValidatorIndex,
-) ([]domain.ValidatorDuty, error) {
-	beaconIndices := make([]phase0.ValidatorIndex, 0, len(indices))
-	for _, idx := range indices {
-		beaconIndices = append(beaconIndices, phase0.ValidatorIndex(idx))
+// internal/adapters/beaconchain_adapter.go
+func (b *beaconAttestantClient) GetValidatorDutiesBatch(ctx context.Context, epoch domain.Epoch, validatorIndices []domain.ValidatorIndex) ([]domain.ValidatorDuty, error) {
+	// Convert to phase0.ValidatorIndex
+	var indices []phase0.ValidatorIndex
+	for _, idx := range validatorIndices {
+		indices = append(indices, phase0.ValidatorIndex(idx))
 	}
 
 	duties, err := b.client.AttesterDuties(ctx, &api.AttesterDutiesOpts{
 		Epoch:   phase0.Epoch(epoch),
-		Indices: beaconIndices,
+		Indices: indices,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]domain.ValidatorDuty, 0, len(duties.Data))
+	// Map the response to domain.ValidatorDuty
+	var domainDuties []domain.ValidatorDuty
 	for _, d := range duties.Data {
-		result = append(result, domain.ValidatorDuty{
-			ValidatorIndex:        domain.ValidatorIndex(d.ValidatorIndex),
+		domainDuties = append(domainDuties, domain.ValidatorDuty{
 			Slot:                  domain.Slot(d.Slot),
 			CommitteeIndex:        domain.CommitteeIndex(d.CommitteeIndex),
 			ValidatorCommitteeIdx: d.ValidatorCommitteeIndex,
+			ValidatorIndex:        domain.ValidatorIndex(d.ValidatorIndex), // new field
+			CommitteeLength:       d.CommitteeLength,                       // NEW
+			CommitteesAtSlot:      d.CommitteesAtSlot,                      // NEW
 		})
 	}
-	return result, nil
+
+	return domainDuties, nil
 }
 
-// GetProposerDuties returns proposer duties for given validators in an epoch.
-func (b *beaconHTTPClient) GetProposerDuties(
-	ctx context.Context,
-	epoch domain.Epoch,
-	indices []domain.ValidatorIndex,
-) ([]domain.ProposerDuty, error) {
-	beaconIndices := make([]phase0.ValidatorIndex, 0, len(indices))
-	for _, idx := range indices {
-		beaconIndices = append(beaconIndices, phase0.ValidatorIndex(idx))
-	}
-
-	resp, err := b.client.ProposerDuties(ctx, &api.ProposerDutiesOpts{
+func (b *beaconAttestantClient) GetValidatorDuties(ctx context.Context, epoch domain.Epoch, validatorIndex domain.ValidatorIndex) (domain.ValidatorDuty, error) {
+	duties, err := b.client.AttesterDuties(ctx, &api.AttesterDutiesOpts{
 		Epoch:   phase0.Epoch(epoch),
-		Indices: beaconIndices,
+		Indices: []phase0.ValidatorIndex{phase0.ValidatorIndex(validatorIndex)},
 	})
 	if err != nil {
-		return nil, err
+		return domain.ValidatorDuty{}, err
 	}
 
-	duties := make([]domain.ProposerDuty, 0, len(resp.Data))
-	for _, d := range resp.Data {
-		duties = append(duties, domain.ProposerDuty{
-			ValidatorIndex: domain.ValidatorIndex(d.ValidatorIndex),
-			Slot:           domain.Slot(d.Slot),
-		})
+	// 🚨 TODO: how to log this here? needed for validators loaded into web3signer but exited (no duties)
+	if len(duties.Data) == 0 {
+		return domain.ValidatorDuty{}, fmt.Errorf("no duties found for validator %d at epoch %d", validatorIndex, epoch)
 	}
-	return duties, nil
+
+	duty := duties.Data[0]
+	return domain.ValidatorDuty{
+		Slot:                  domain.Slot(duty.Slot),
+		CommitteeIndex:        domain.CommitteeIndex(duty.CommitteeIndex),
+		ValidatorCommitteeIdx: duty.ValidatorCommitteeIndex,
+	}, nil
 }
 
-// DidProposeBlock checks whether a block exists at a given slot.
-func (b *beaconHTTPClient) DidProposeBlock(
-	ctx context.Context,
-	slot domain.Slot,
-) (bool, error) {
+// GetBlockAttestations retrieves all attestations include in a slot
+func (b *beaconAttestantClient) GetBlockAttestations(ctx context.Context, slot domain.Slot) ([]domain.Attestation, error) {
 	block, err := b.client.SignedBeaconBlock(ctx, &api.SignedBeaconBlockOpts{
 		Block: fmt.Sprintf("%d", slot),
 	})
 	if err != nil {
-		// Missed slot → 404.
-		if apiErr, ok := err.(*api.Error); ok && apiErr.StatusCode == 404 {
-			return false, nil
-		}
-		return false, err
-	}
-	return block != nil && block.Data != nil, nil
-}
-
-// GetEpochCommittees returns:
-//
-//	data-slot → committee-index → []validatorIndex
-func (b *beaconHTTPClient) GetEpochCommittees(
-	ctx context.Context,
-	epoch domain.Epoch,
-) (domain.EpochCommittees, error) {
-	e := phase0.Epoch(epoch)
-	resp, err := b.client.BeaconCommittees(ctx, &api.BeaconCommitteesOpts{
-		// Epoch filters by epoch, state defaults to "head".
-		Epoch: &e,
-	})
-	if err != nil {
 		return nil, err
 	}
 
-	result := make(domain.EpochCommittees)
-	for _, c := range resp.Data {
-		slot := domain.Slot(c.Slot)
-		index := domain.CommitteeIndex(c.Index)
-
-		vals := make([]domain.ValidatorIndex, len(c.Validators))
-		for i, v := range c.Validators {
-			vals[i] = domain.ValidatorIndex(v)
-		}
-
-		slotMap, ok := result[slot]
-		if !ok {
-			slotMap = make(map[domain.CommitteeIndex][]domain.ValidatorIndex)
-			result[slot] = slotMap
-		}
-		slotMap[index] = vals
-	}
-	return result, nil
-}
-
-// GetBlockAttestations returns all attestations included in the block at `slot`.
-//
-// We:
-//   - treat 404 as "missed slot": return (nil, nil)
-//   - currently only support Electra blocks (as your logic assumes committee_bits).
-func (b *beaconHTTPClient) GetBlockAttestations(
-	ctx context.Context,
-	slot domain.Slot,
-) ([]domain.Attestation, error) {
-	block, err := b.client.SignedBeaconBlock(ctx, &api.SignedBeaconBlockOpts{
-		Block: fmt.Sprintf("%d", slot),
-	})
-	if err != nil {
-		if apiErr, ok := err.(*api.Error); ok && apiErr.StatusCode == 404 {
-			// No block at this slot → no attestations.
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	if block == nil || block.Data == nil || block.Data.Electra == nil {
-		// Pre-Electra or unexpected shape: skip for now.
-		return nil, nil
-	}
-
-	var out []domain.Attestation
-	for _, att := range block.Data.Electra.Message.Body.Attestations {
-		out = append(out, domain.Attestation{
+	var attestations []domain.Attestation
+	//TODO: fork-sensitive. include all block types
+	for _, att := range block.Data.Fulu.Message.Body.Attestations {
+		attestations = append(attestations, domain.Attestation{
 			DataSlot:        domain.Slot(att.Data.Slot),
 			CommitteeBits:   att.CommitteeBits,
 			AggregationBits: att.AggregationBits,
 		})
 	}
-	return out, nil
+	return attestations, nil
 }
 
-// (Optional) still useful if you want standalone index→pubkey mapping elsewhere.
-func (b *beaconHTTPClient) GetValidatorIndicesByPubkeys(
-	ctx context.Context,
-	pubkeys []string,
-) ([]domain.ValidatorIndex, error) {
+// GetCommitteeSizeMap retrieves the size of each attestation committee for a specific slot.
+func (b *beaconAttestantClient) GetCommitteeSizeMap(ctx context.Context, slot domain.Slot) (domain.CommitteeSizeMap, error) {
+	committees, err := b.client.BeaconCommittees(ctx, &api.BeaconCommitteesOpts{
+		State: fmt.Sprintf("%d", slot),
+	})
+	if err != nil {
+		return nil, err
+	}
+	sizeMap := make(domain.CommitteeSizeMap)
+	for _, committee := range committees.Data {
+		if domain.Slot(committee.Slot) != slot {
+			continue
+		}
+		sizeMap[domain.CommitteeIndex(committee.Index)] = len(committee.Validators)
+	}
+	return sizeMap, nil
+}
+
+func (b *beaconAttestantClient) GetValidatorIndicesByPubkeys(ctx context.Context, pubkeys []string) ([]domain.ValidatorIndex, error) {
 	var beaconPubkeys []phase0.BLSPubKey
 
+	// Convert hex pubkeys to BLS pubkeys
 	for _, hexPubkey := range pubkeys {
+		// Remove "0x" prefix if present
 		if len(hexPubkey) >= 2 && hexPubkey[:2] == "0x" {
 			hexPubkey = hexPubkey[2:]
 		}
-
 		bytes, err := hex.DecodeString(hexPubkey)
 		if err != nil {
 			return nil, errors.New("failed to decode pubkey: " + hexPubkey)
@@ -224,12 +160,13 @@ func (b *beaconHTTPClient) GetValidatorIndicesByPubkeys(
 		if len(bytes) != 48 {
 			return nil, errors.New("invalid pubkey length for: " + hexPubkey)
 		}
-
 		var blsPubkey phase0.BLSPubKey
 		copy(blsPubkey[:], bytes)
 		beaconPubkeys = append(beaconPubkeys, blsPubkey)
 	}
 
+	// Only get validators in active states
+	// TODO: why do I need apiv1 for this struct? is there something newer?
 	validators, err := b.client.Validators(ctx, &api.ValidatorsOpts{
 		State:   "head",
 		PubKeys: beaconPubkeys,
@@ -243,9 +180,50 @@ func (b *beaconHTTPClient) GetValidatorIndicesByPubkeys(
 		return nil, err
 	}
 
-	indices := make([]domain.ValidatorIndex, 0, len(validators.Data))
+	var indices []domain.ValidatorIndex
 	for _, v := range validators.Data {
 		indices = append(indices, domain.ValidatorIndex(v.Index))
 	}
 	return indices, nil
+}
+
+// GetProposerDuties retrieves proposer duties for the given epoch and validator indices.
+func (b *beaconAttestantClient) GetProposerDuties(ctx context.Context, epoch domain.Epoch, indices []domain.ValidatorIndex) ([]domain.ProposerDuty, error) {
+	var beaconIndices []phase0.ValidatorIndex
+	for _, idx := range indices {
+		beaconIndices = append(beaconIndices, phase0.ValidatorIndex(idx))
+	}
+
+	resp, err := b.client.ProposerDuties(ctx, &api.ProposerDutiesOpts{
+		Epoch:   phase0.Epoch(epoch),
+		Indices: beaconIndices,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var duties []domain.ProposerDuty
+	for _, d := range resp.Data {
+		duties = append(duties, domain.ProposerDuty{
+			Slot:           domain.Slot(d.Slot),
+			ValidatorIndex: domain.ValidatorIndex(d.ValidatorIndex),
+		})
+	}
+	return duties, nil
+}
+
+// DidProposeBlock checks a given slot includes a block proposed
+func (b *beaconAttestantClient) DidProposeBlock(ctx context.Context, slot domain.Slot) (bool, error) {
+	block, err := b.client.SignedBeaconBlock(ctx, &api.SignedBeaconBlockOpts{
+		Block: fmt.Sprintf("%d", slot),
+	})
+	if err != nil {
+		// TODO: are we sure we can assume that a 404 means the block was not proposed?
+		// What error code is returned in all consensus if the block is not in their state?
+		if apiErr, ok := err.(*api.Error); ok && apiErr.StatusCode == 404 {
+			return false, nil // Block was not proposed
+		}
+		return false, err // Real error
+	}
+	return block != nil && block.Data != nil, nil
 }

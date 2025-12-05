@@ -41,8 +41,8 @@ func NewDutiesChecker(
 // ended, we won't start a new check, we will just wait for the next tick.
 func (a *DutiesChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(a.PollInterval)
+	a.checkLatestFinalizedEpoch(ctx)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ticker.C:
@@ -115,14 +115,13 @@ func (a *DutiesChecker) checkProposals(
 	}
 }
 
-// Scalable per-attestation processing.
 func (a *DutiesChecker) checkAttestations(
 	ctx context.Context,
 	finalizedEpoch domain.Epoch,
 	validatorIndices []domain.ValidatorIndex,
 ) {
-	// 1) Get attestation duties for our validators (same as before)
 	duties, err := a.BeaconAdapter.GetValidatorDutiesBatch(ctx, finalizedEpoch, validatorIndices)
+
 	if err != nil {
 		logger.Error("Error fetching validator duties: %v", err)
 		return
@@ -132,98 +131,42 @@ func (a *DutiesChecker) checkAttestations(
 		return
 	}
 
-	// Map of "validators we care about"
-	tracked := make(map[domain.ValidatorIndex]struct{}, len(validatorIndices))
-	for _, idx := range validatorIndices {
-		tracked[idx] = struct{}{}
+	// Collect unique duty slots.
+	dutySlots := make(map[domain.Slot]struct{})
+	for _, d := range duties {
+		dutySlots[d.Slot] = struct{}{}
 	}
 
-	// 2) Compute epoch slot range
-	startSlot := domain.Slot(uint64(finalizedEpoch) * uint64(SlotsPerEpoch))
-	endSlot := startSlot + SlotsPerEpoch - 1
-
-	// 3) Get full committees for this epoch (for all validators, not just ours)
-	epochCommittees, err := a.BeaconAdapter.GetEpochCommittees(ctx, finalizedEpoch)
-	if err != nil {
-		logger.Error("Error fetching epoch committees for epoch %d: %v", finalizedEpoch, err)
-		return
-	}
-
-	// 4) Preload attestations for the inclusion window [startSlot+1 .. endSlot+32]
-	slotAttestations := preloadSlotAttestations(ctx, a.BeaconAdapter, startSlot, endSlot)
-
-	// 5) attested[vIdx] == true if we see an aggregation bit set for that validator in this epoch
-	attested := make(map[domain.ValidatorIndex]bool, len(validatorIndices))
-
-	// Process all attestations once
-	for includedSlot, atts := range slotAttestations {
-		if len(atts) == 0 {
+	// Build: slot -> committee-index -> size using full committee info from beacon.
+	slotCommitteeSizes := make(map[domain.Slot]domain.CommitteeSizeMap)
+	for slot := range dutySlots {
+		m, err := a.BeaconAdapter.GetCommitteeSizeMap(ctx, slot)
+		if err != nil {
+			logger.Warn("Error fetching committee sizes for slot %d: %v", slot, err)
 			continue
 		}
-		for _, att := range atts {
-			// Only care about attestations whose *data slot* is within the finalized epoch
-			dataSlot := att.DataSlot
-			if dataSlot < startSlot || dataSlot > endSlot {
-				continue
-			}
-
-			// Get committees for this data slot
-			slotCommittees, ok := epochCommittees[dataSlot]
-			if !ok {
-				logger.Warn("No committees found for data slot %d (included in block slot %d)", dataSlot, includedSlot)
-				continue
-			}
-
-			// Decode which committees are aggregated in this attestation
-			aggregatedCommittees := getTrueBitIndices(att.CommitteeBits)
-			if len(aggregatedCommittees) == 0 {
-				continue
-			}
-
-			// Now walk through committees in the order of committeeBits and map aggregation bits → validators
-			bitBase := 0
-			for _, commIdxInt := range aggregatedCommittees {
-				commIdx := domain.CommitteeIndex(commIdxInt)
-				validators, ok := slotCommittees[commIdx]
-				if !ok || len(validators) == 0 {
-					// This can happen if beacon node committee info and block data are inconsistent
-					logger.Warn("Committee %d not found for data slot %d while processing attestation in included slot %d",
-						commIdx, dataSlot, includedSlot)
-					continue
-				}
-
-				for localPos, valIndex := range validators {
-					// Global bit position inside AggregationBits
-					globalBit := bitBase + localPos
-					if !isBitSet(att.AggregationBits, globalBit) {
-						continue
-					}
-					if _, ok := tracked[valIndex]; !ok {
-						// We don't care about non-tracked validators
-						continue
-					}
-					attested[valIndex] = true
-				}
-
-				bitBase += len(validators)
-			}
-		}
+		slotCommitteeSizes[slot] = m
 	}
 
-	// 6) For each duty, decide if the validator attested or not (end result same as before)
+	logger.Info("slotCommitteeSizes are %+v", slotCommitteeSizes)
+
+	minSlot, maxSlot := getSlotRangeForDuties(duties)
+	slotAttestations := preloadSlotAttestations(ctx, a.BeaconAdapter, minSlot, maxSlot)
+
 	for _, duty := range duties {
-		if attested[duty.ValidatorIndex] {
-			logger.Info("✅ Validator %d attested for duty slot %d in finalized epoch %d",
-				duty.ValidatorIndex, duty.Slot, finalizedEpoch)
-		} else {
-			logger.Warn("❌ No attestation found for validator %d in finalized epoch %d (duty slot %d)",
-				duty.ValidatorIndex, finalizedEpoch, duty.Slot)
+		attestationFound := a.checkDutyAttestation(ctx, duty, slotAttestations, slotCommitteeSizes)
+		if !attestationFound {
+			logger.Warn(
+				" ❌ No attestation found for validator %d in finalized epoch %d; duty=%+v",
+				duty.ValidatorIndex,
+				finalizedEpoch,
+				duty,
+			)
 		}
 		a.markCheckedThisEpoch(duty.ValidatorIndex, finalizedEpoch)
 	}
 }
 
-// getValidatorsToCheck filters out validators already checked for this epoch.
 func (a *DutiesChecker) getValidatorsToCheck(indices []domain.ValidatorIndex, epoch domain.Epoch) []domain.ValidatorIndex {
 	var result []domain.ValidatorIndex
 	for _, index := range indices {
@@ -236,9 +179,6 @@ func (a *DutiesChecker) getValidatorsToCheck(indices []domain.ValidatorIndex, ep
 }
 
 func (a *DutiesChecker) wasCheckedThisEpoch(index domain.ValidatorIndex, epoch domain.Epoch) bool {
-	if a.checkedEpochs == nil {
-		return false
-	}
 	return a.checkedEpochs[index] == epoch
 }
 
@@ -249,7 +189,20 @@ func (a *DutiesChecker) markCheckedThisEpoch(index domain.ValidatorIndex, epoch 
 	a.checkedEpochs[index] = epoch
 }
 
-// preloadSlotAttestations loads attestations for [minSlot+1 .. maxSlot+32], to cover inclusion distances up to 32.
+// Important: This function assumes duties is not empty (at least one duty exists).
+func getSlotRangeForDuties(duties []domain.ValidatorDuty) (domain.Slot, domain.Slot) {
+	minSlot, maxSlot := duties[0].Slot, duties[0].Slot
+	for _, d := range duties {
+		if d.Slot < minSlot {
+			minSlot = d.Slot
+		}
+		if d.Slot > maxSlot {
+			maxSlot = d.Slot
+		}
+	}
+	return minSlot, maxSlot
+}
+
 func preloadSlotAttestations(ctx context.Context, beacon ports.BeaconChainAdapter, minSlot, maxSlot domain.Slot) map[domain.Slot][]domain.Attestation {
 	result := make(map[domain.Slot][]domain.Attestation)
 	for slot := minSlot + 1; slot <= maxSlot+32; slot++ {
@@ -263,15 +216,85 @@ func preloadSlotAttestations(ctx context.Context, beacon ports.BeaconChainAdapte
 	return result
 }
 
-// getTrueBitIndices returns the indices of bits that are 1 in the given bitfield.
-func getTrueBitIndices(bits []byte) []int {
-	var indices []int
-	for i := 0; i < len(bits)*8; i++ {
-		if isBitSet(bits, i) {
-			indices = append(indices, i)
+// checkDutyAttestation checks if there is an attestation for the given duty in the next 32 slots.
+// It uses the committee size cache to avoid fetching committee sizes for every duty in repeated slots.
+func (a *DutiesChecker) checkDutyAttestation(
+	ctx context.Context,
+	duty domain.ValidatorDuty,
+	slotAttestations map[domain.Slot][]domain.Attestation,
+	slotCommitteeSizes map[domain.Slot]domain.CommitteeSizeMap,
+) bool {
+	committeeSizeMap, ok := slotCommitteeSizes[duty.Slot]
+	if !ok {
+		logger.Warn("No committee size map for duty slot %d", duty.Slot)
+		return false
+	}
+
+	for slot := duty.Slot + 1; slot <= duty.Slot+32; slot++ {
+		attestations := slotAttestations[slot]
+		for _, att := range attestations {
+			if att.DataSlot != duty.Slot {
+				continue
+			}
+			if !isBitSet(att.CommitteeBits, int(duty.CommitteeIndex)) {
+				continue
+			}
+			bitPosition := computeBitPosition(
+				duty.CommitteeIndex,
+				duty.ValidatorCommitteeIdx,
+				att.CommitteeBits,
+				committeeSizeMap,
+			)
+			if !isBitSet(att.AggregationBits, bitPosition) {
+				continue
+			}
+			logger.Info("✅ Validator %d attested in committee %d for duty slot %d (included in block slot %d)",
+				duty.ValidatorIndex, duty.CommitteeIndex, duty.Slot, slot)
+
+			logger.Info(
+				"MATCH: vIdx=%d dutySlot=%d dutyCommittee=%d includedSlot=%d att.DataSlot=%d bitPos=%d aggLen=%d",
+				duty.ValidatorIndex,
+				duty.Slot,
+				duty.CommitteeIndex,
+				slot,
+				att.DataSlot,
+				bitPosition,
+				len(att.AggregationBits)*8,
+			)
+
+			if att.DataSlot != slot-1 {
+				logger.Warn("⚠️ Attestation")
+
+			}
+
+			return true
 		}
 	}
-	return indices
+
+	return false
+}
+
+// computeBitPosition calculates the bit position for the validator in the committee bits.
+// It sums the sizes of all committees before the one the validator is in, and adds the validator's index in that committee.
+// This is used to determine if the validator's aggregation bit is set in the attestation.
+func computeBitPosition(
+	validatorCommitteeIndex domain.CommitteeIndex,
+	validatorIndexInCommittee uint64,
+	committeeBits []byte,
+	committeeSizeMap domain.CommitteeSizeMap,
+) int {
+	bitPosition := 0
+	for i := 0; i < 64; i++ {
+		if !isBitSet(committeeBits, i) { // if the committee bit is not set, dont add its size to final bit position
+			continue
+		}
+		if i == int(validatorCommitteeIndex) { // We got to the committee of the validator, we can stop here.
+			break
+		}
+		bitPosition += committeeSizeMap[domain.CommitteeIndex(i)] // Add the size of the committee to the bit position. Bit was set and it's not the committee of the validator.
+	}
+	bitPosition += int(validatorIndexInCommittee)
+	return bitPosition
 }
 
 func isBitSet(bits []byte, index int) bool {

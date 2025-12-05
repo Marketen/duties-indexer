@@ -24,7 +24,7 @@ func main() {
 	logger.Info("Poll interval: %s", cfg.PollInterval)
 	logger.Info("Tracking %d validators", len(cfg.ValidatorIndices))
 
-	beaconAdapter, err := adapters.NewBeaconHTTPAdapter(cfg.BeaconNodeURL)
+	beaconAdapter, err := adapters.NewBeaconAttestantAdapter(cfg.BeaconNodeURL)
 	if err != nil {
 		logger.Error("Failed to create beacon HTTP adapter: %v", err)
 		os.Exit(1)
