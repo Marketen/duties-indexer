@@ -251,22 +251,6 @@ func (a *DutiesChecker) checkDutyAttestation(
 			logger.Info("✅ Validator %d attested in committee %d for duty slot %d (included in block slot %d)",
 				duty.ValidatorIndex, duty.CommitteeIndex, duty.Slot, slot)
 
-			logger.Info(
-				"MATCH: vIdx=%d dutySlot=%d dutyCommittee=%d includedSlot=%d att.DataSlot=%d bitPos=%d aggLen=%d",
-				duty.ValidatorIndex,
-				duty.Slot,
-				duty.CommitteeIndex,
-				slot,
-				att.DataSlot,
-				bitPosition,
-				len(att.AggregationBits)*8,
-			)
-
-			if att.DataSlot != slot-1 {
-				logger.Warn("⚠️ Attestation")
-
-			}
-
 			return true
 		}
 	}
